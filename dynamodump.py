@@ -9,19 +9,19 @@
 """
 
 import argparse
+import datetime
+import errno
 import fnmatch
 import json
 import logging
 import os
-import shutil
-import threading
-import datetime
-import errno
-import sys
-import time
 import re
-import zipfile
+import shutil
+import sys
 import tarfile
+import threading
+import time
+import zipfile
 
 try:
     from queue import Queue
@@ -38,7 +38,6 @@ import boto.dynamodb2.layer1
 from boto.dynamodb2.exceptions import ProvisionedThroughputExceededException
 import botocore
 import boto3
-
 
 JSON_INDENT = 2
 AWS_SLEEP_INTERVAL = 10  # seconds
@@ -172,7 +171,7 @@ def do_get_s3_archive(profile, region, bucket, table, archive):
         )
     except botocore.exceptions.ClientError as e:
         logging.exception("S3 bucket " + bucket + " does not exist. "
-                          "Can't get backup file\n\n" + str(e))
+                                                  "Can't get backup file\n\n" + str(e))
         sys.exit(1)
 
     try:
@@ -323,7 +322,7 @@ def get_restore_table_matches(table_name_wildcard, separator):
         elif separator == "":
 
             if dir_name.startswith(re.sub(r"([A-Z])", r" \1", table_name_wildcard.split("*", 1)[0])
-                                   .split()[0]):
+                                           .split()[0]):
                 matching_tables.append(dir_name)
         elif dir_name.split(separator, 1)[0] == table_name_wildcard.split("*", 1)[0]:
             matching_tables.append(dir_name)
@@ -340,7 +339,7 @@ def change_prefix(source_table_name, source_wildcard, destination_wildcard, sepa
     destination_prefix = destination_wildcard.split("*", 1)[0]
     if separator == "":
         if re.sub(r"([A-Z])", r" \1", source_table_name).split()[0] == source_prefix:
-            return destination_prefix + re.sub(r"([A-Z])", r" \1", source_table_name)\
+            return destination_prefix + re.sub(r"([A-Z])", r" \1", source_table_name) \
                 .split(" ", 1)[1].replace(" ", "")
     if source_table_name.split(separator, 1)[0] == source_prefix:
         return destination_prefix + separator + source_table_name.split(separator, 1)[1]
@@ -691,7 +690,7 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
         wait_for_active_table(dynamo, destination_table, "created")
     else:
         # update provisioned capacity
-        if int(write_capacity) > original_write_capacity:
+        if not args.skipThroughputUpdate and int(write_capacity) > original_write_capacity:
             update_provisioned_throughput(dynamo,
                                           destination_table,
                                           original_read_capacity,
@@ -716,20 +715,24 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
             items.extend(item_data["Items"])
 
             # batch write data
-            put_requests = []
             while len(items) > 0:
-                put_requests.append({"PutRequest": {"Item": items.pop(0)}})
+                # put_requests.append({"PutRequest": {"Item": items.pop(0)}})
+                item = items.pop(0)
+                key = {args.idField: item[args.idField]}
+                old_item = dynamo.get_item(table_name=destination_table, key=key)
 
-                # flush every MAX_BATCH_WRITE
-                if len(put_requests) == MAX_BATCH_WRITE:
-                    logging.debug("Writing next " + str(MAX_BATCH_WRITE) +
-                                  " items to " + destination_table + "..")
-                    batch_write(dynamo, BATCH_WRITE_SLEEP_INTERVAL, destination_table, put_requests)
-                    del put_requests[:]
+                if len(items) % 100 == 0:
+                    logging.info("Left {} items to process in file {}".format(len(items), data_file))
 
-            # flush remainder
-            if len(put_requests) > 0:
-                batch_write(dynamo, BATCH_WRITE_SLEEP_INTERVAL, destination_table, put_requests)
+                if bool(old_item) is False:
+                    dynamo.put_item(destination_table, item)
+                else:
+                    old_version = int(
+                        old_item["Item"][args.versionField]["N"])
+                    new_version = int(item[args.versionField]["N"])
+
+                    if new_version > old_version:
+                        dynamo.put_item(destination_table, item)
 
         if not args.skipThroughputUpdate:
             # revert to original table write capacity if it has been modified
@@ -785,7 +788,7 @@ def do_restore(dynamo, sleep_interval, source_table, destination_table, write_ca
 
         logging.info("Restore for " + source_table + " to " + destination_table +
                      " table completed. Time taken: " + str(
-                         datetime.datetime.now().replace(microsecond=0) - start_time))
+            datetime.datetime.now().replace(microsecond=0) - start_time))
     else:
         logging.info("Empty schema of " + source_table + " table created. Time taken: " +
                      str(datetime.datetime.now().replace(microsecond=0) - start_time))
@@ -801,58 +804,62 @@ def main():
     # parse args
     parser = argparse.ArgumentParser(description="Simple DynamoDB backup/restore/empty.")
     parser.add_argument("-a", "--archive", help="Type of compressed archive to create."
-                        "If unset, don't create archive", choices=["zip", "tar"])
+                                                "If unset, don't create archive", choices=["zip", "tar"])
     parser.add_argument("-b", "--bucket", help="S3 bucket in which to store or retrieve backups."
-                        "[must already exist]")
+                                               "[must already exist]")
     parser.add_argument("-m", "--mode", help="Operation to perform",
                         choices=["backup", "restore", "empty"])
     parser.add_argument("-r", "--region", help="AWS region to use, e.g. 'us-west-1'. "
-                        "Can use AWS_DEFAULT_REGION for local testing.  Use '" +
-                        LOCAL_REGION + "' for local DynamoDB testing")
+                                               "Can use AWS_DEFAULT_REGION for local testing.  Use '" +
+                                               LOCAL_REGION + "' for local DynamoDB testing")
     parser.add_argument("--host", help="Host of local DynamoDB [required only for local]")
     parser.add_argument("--port", help="Port of local DynamoDB [required only for local]")
     parser.add_argument("--accessKey", help="Access key of local DynamoDB "
-                        "[required only for local]")
+                                            "[required only for local]")
     parser.add_argument("--secretKey", help="Secret key of local DynamoDB "
-                        "[required only for local]")
+                                            "[required only for local]")
     parser.add_argument("-p", "--profile",
                         help="AWS credentials file profile to use. Allows you to use a "
-                        "profile instead accessKey, secretKey authentication")
+                             "profile instead accessKey, secretKey authentication")
     parser.add_argument("-s", "--srcTable",
                         help="Source DynamoDB table name to backup or restore from, "
-                        "use 'tablename*' for wildcard prefix selection or '*' for "
-                        "all tables.  Mutually exclusive with --tag")
+                             "use 'tablename*' for wildcard prefix selection or '*' for "
+                             "all tables.  Mutually exclusive with --tag")
     parser.add_argument("-d", "--destTable",
                         help="Destination DynamoDB table name to backup or restore to, "
-                        "use 'tablename*' for wildcard prefix selection "
-                        "(defaults to use '-' separator) [optional, defaults to source]")
+                             "use 'tablename*' for wildcard prefix selection "
+                             "(defaults to use '-' separator) [optional, defaults to source]")
     parser.add_argument("--prefixSeparator", help="Specify a different prefix separator, "
-                        "e.g. '.' [optional]")
+                                                  "e.g. '.' [optional]")
     parser.add_argument("--noSeparator", action='store_true',
                         help="Overrides the use of a prefix separator for backup wildcard "
-                        "searches [optional]")
+                             "searches [optional]")
     parser.add_argument("--readCapacity",
                         help="Change the temp read capacity of the DynamoDB table to backup "
-                        "from [optional]")
+                             "from [optional]")
     parser.add_argument("-t", "--tag", help="Tag to use for identifying tables to back up.  "
-                        "Mutually exclusive with srcTable.  Provided as KEY=VALUE")
+                                            "Mutually exclusive with srcTable.  Provided as KEY=VALUE")
     parser.add_argument("--writeCapacity",
                         help="Change the temp write capacity of the DynamoDB table to restore "
-                        "to [defaults to " + str(RESTORE_WRITE_CAPACITY) + ", optional]")
+                             "to [defaults to " + str(RESTORE_WRITE_CAPACITY) + ", optional]")
     parser.add_argument("--schemaOnly", action="store_true", default=False,
                         help="Backup or restore the schema only. Do not backup/restore data. "
-                        "Can be used with both backup and restore modes. Cannot be used with "
-                        "the --dataOnly [optional]")
+                             "Can be used with both backup and restore modes. Cannot be used with "
+                             "the --dataOnly [optional]")
     parser.add_argument("--dataOnly", action="store_true", default=False,
                         help="Restore data only. Do not delete/recreate schema [optional for "
-                        "restore]")
+                             "restore]")
     parser.add_argument("--skipThroughputUpdate", action="store_true", default=False,
                         help="Skip updating throughput values across tables [optional]")
     parser.add_argument("--dumpPath", help="Directory to place and search for DynamoDB table "
-                        "backups (defaults to use '" + str(DATA_DUMP) + "') [optional]",
+                                           "backups (defaults to use '" + str(DATA_DUMP) + "') [optional]",
                         default=str(DATA_DUMP))
     parser.add_argument("--log", help="Logging level - DEBUG|INFO|WARNING|ERROR|CRITICAL "
-                        "[optional]")
+                                      "[optional]")
+    parser.add_argument("--versionField", help="DynamoDB field that is used for storing version of the "
+                                               "item in that table")
+    parser.add_argument("--idField", help="DynamoDB field that is used for storing the primary key / hash key "
+                                          "of that table")
     args = parser.parse_args()
 
     # set log level
@@ -864,6 +871,10 @@ def main():
     # Check to make sure that --dataOnly and --schemaOnly weren't simultaneously specified
     if args.schemaOnly and args.dataOnly:
         logging.info("Options --schemaOnly and --dataOnly are mutually exclusive.")
+        sys.exit(1)
+
+    if args.mode == "restore" and (args.versionField is None or args.idField is None):
+        logging.warn("Options --versionField and --idField are required for restore operation")
         sys.exit(1)
 
     # instantiate connection

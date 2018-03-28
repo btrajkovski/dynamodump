@@ -9,6 +9,11 @@ Suitable for DynamoDB usages of smaller data volume which do not warrant the usa
 
 dynamodump supports local DynamoDB instances as well (tested with [DynamoDB Local](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html)).
 
+
+Changes from original dynamoDB dump
+-----
+Restore is done with get/put request and checks for dynamoDB version of objects. Currently batch_write does not support dynamoDB versions and is overwriting newer items. One way to fix this is to use get/put and manually check if dynamoDB version is greater than previous one.
+
 Usage
 -----
 ```
